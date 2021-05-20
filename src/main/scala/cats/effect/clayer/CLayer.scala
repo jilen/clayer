@@ -16,6 +16,8 @@
 package cats.effect.clayer
 
 import cats._
+import cats.effect._
+import cats.syntax.all._
 
 /**
  * A `CLayer[A, E, B]` describes a layer of an application: every layer in an
@@ -95,25 +97,25 @@ sealed abstract class CLayer[F[_]: Raise, -RIn, +ROut] { self =>
   /**
    * A named alias for `++`.
    */
-  final def and[E1 >: E, RIn2, ROut1 >: ROut, ROut2](
-    that: FLayer[RIn2, E1, ROut2]
-  )(implicit ev: Has.Union[ROut1, ROut2], tagged: Tag[ROut2]): FLayer[RIn with RIn2, E1, ROut1 with ROut2] =
-    self.++[E1, RIn2, ROut1, ROut2](that)
+  final def and[RIn2, ROut1 >: ROut, ROut2](
+    that: FLayer[RIn2, ROut2]
+  )(implicit ev: Has.Union[ROut1, ROut2], tagged: Tag[ROut2]): FLayer[RIn with RIn2, ROut1 with ROut2] =
+    self.++[RIn2, ROut1, ROut2](that)
 
   /**
    * A named alias for `>+>`.
    */
-  final def andTo[E1 >: E, RIn2 >: ROut, ROut1 >: ROut, ROut2](
-    that: FLayer[RIn2, E1, ROut2]
-  )(implicit ev: Has.Union[ROut1, ROut2], tagged: Tag[ROut2]): FLayer[RIn, E1, ROut1 with ROut2] =
-    self.>+>[E1, RIn2, ROut1, ROut2](that)
+  final def andTo[RIn2 >: ROut, ROut1 >: ROut, ROut2](
+    that: FLayer[RIn2, ROut2]
+  )(implicit ev: Has.Union[ROut1, ROut2], tagged: Tag[ROut2]): FLayer[RIn, ROut1 with ROut2] =
+    self.>+>[RIn2, ROut1, ROut2](that)
 
   /**
    * Builds a layer into a managed value.
    */
-  final def build: ZManaged[RIn, E, ROut] =
+  final def build(implicit F: Sync[F]): Managed[F, RIn, ROut] =
     for {
-      memoMap <- FLayer.MemoMap.make.toManaged_
+      memoMap <- Managed.liftF(CLayer.MemoMap.make)
       run     <- self.scope
       value   <- run(memoMap)
     } yield value
@@ -121,11 +123,11 @@ sealed abstract class CLayer[F[_]: Raise, -RIn, +ROut] { self =>
   /**
    * Recovers from all errors.
    */
-  final def catchAll[RIn1 <: RIn, E1, ROut1 >: ROut](
-    handler: FLayer[(RIn1, E), E1, ROut1]
-  ): FLayer[RIn1, E1, ROut1] = {
-    val failureOrDie: FLayer[(RIn1, Cause[E]), Nothing, (RIn1, E)] =
-      FLayer.fromFunctionManyM {
+  final def catchAll[RIn1 <: RIn, ROut1 >: ROut](
+    handler: FLayer[(RIn1, Throwable), ROut1]
+  ): FLayer[RIn1, ROut1] = {
+    val failureOrDie: FLayer[(RIn1, Throwable), RIn1] =
+      CLayer.fromFunctionManyM {
         case (r, cause) =>
           cause.failureOrCause.fold(
             e => ZIO.succeed((r, e)),
@@ -182,7 +184,7 @@ sealed abstract class CLayer[F[_]: Raise, -RIn, +ROut] { self =>
    * Returns a managed effect that, if evaluated, will return the lazily
    * computed result of this layer.
    */
-  final def memoize: ZManaged[Any, Nothing, FLayer[RIn, E, ROut]] =
+  final def memoize: Managed[Any, Nothing, FLayer[RIn, E, ROut]] =
     build.memoize.map(FLayer(_))
 
   /**
@@ -283,14 +285,14 @@ sealed abstract class CLayer[F[_]: Raise, -RIn, +ROut] { self =>
       case _ => false
     }
 
-  private final def scope: Managed[Nothing, FLayer.MemoMap => ZManaged[RIn, E, ROut]] =
+  private final def scope: Managed[F, Nothing, CLayer.MemoMap => Managed[F, RIn, ROut]] =
     self match {
       case FLayer.Fold(self, failure, success) =>
-        ZManaged.succeed(memoMap =>
+        Managed.succeed(memoMap =>
           memoMap
             .getOrElseMemoize(self)
             .foldCauseM(
-              e => ZManaged.environment[RIn].flatMap(r => memoMap.getOrElseMemoize(failure).provide((r, e))),
+              e => Managed.environment[RIn].flatMap(r => memoMap.getOrElseMemoize(failure).provide((r, e))),
               r => memoMap.getOrElseMemoize(success).provide(r)(NeedsEnv.needsEnv)
             )
         )
@@ -299,11 +301,11 @@ sealed abstract class CLayer[F[_]: Raise, -RIn, +ROut] { self =>
       case FLayer.Managed(self) =>
         Managed.succeed(_ => self)
       case FLayer.Suspend(self) =>
-         ZManaged.succeed(memoMap => memoMap.getOrElseMemoize(self()))
+         Managed.succeed(memoMap => memoMap.getOrElseMemoize(self()))
       case FLayer.ZipWith(self, that, f) =>
-        ZManaged.succeed(memoMap => memoMap.getOrElseMemoize(self).zipWith(memoMap.getOrElseMemoize(that))(f))
+        Managed.succeed(memoMap => memoMap.getOrElseMemoize(self).zipWith(memoMap.getOrElseMemoize(that))(f))
       case FLayer.ZipWithPar(self, that, f) =>
-        ZManaged.succeed(memoMap => memoMap.getOrElseMemoize(self).zipWithPar(memoMap.getOrElseMemoize(that))(f))
+        Managed.succeed(memoMap => memoMap.getOrElseMemoize(self).zipWithPar(memoMap.getOrElseMemoize(that))(f))
     }
 }
 
@@ -315,9 +317,9 @@ object CLayer {
     success: CLayer[F, ROut, ROut1]
   ) extends CLayer[F,RIn,ROut1]
   private final case class Fresh[F[_], RIn, ROut](self: CLayer[F,RIn, ROut])        extends CLayer[F,RIn, ROut]
-  private final case class Managed[F[_], -RIn, +E, +ROut](self: ZManaged[RIn, ROut]) extends CLayer[F,RIn, ROut]
-  private final case class Suspend[F[_], -RIn, +E, +ROut](self: () => CLayer[F,RIn, ROut]) extends CLayer[F,RIn, ROut]
-  private final case class ZipWith[F[_], -RIn, +E, ROut, ROut2, ROut3](
+  private final case class Managed[F[_], -RIn, +ROut](self: Managed[RIn, ROut]) extends CLayer[F,RIn, ROut]
+  private final case class Suspend[F[_], -RIn, +ROut](self: () => CLayer[F,RIn, ROut]) extends CLayer[F,RIn, ROut]
+  private final case class ZipWith[F[_], -RIn, ROut, ROut2, ROut3](
     self: CLayer[F,RIn, ROut],
     that: CLayer[F,RIn, ROut2],
     f: (ROut, ROut2) => ROut3
@@ -331,14 +333,14 @@ object CLayer {
   /**
    * Constructs a layer from a managed resource.
    */
-  def apply[RIn, ROut](managed: ZManaged[RIn, ROut]): CLayer[F,RIn, ROut] =
+  def apply[RIn, ROut](managed: Managed[RIn, ROut]): CLayer[F,RIn, ROut] =
     Managed(managed)
 
   /**
    * Constructs a layer that fails with the specified value.
    */
   def fail[E](e: E): Layer[E, Nothing] =
-    FLayer(ZManaged.fail(e))
+    FLayer(Managed.fail(e))
 
   /**
    * A layer that passes along the first element of a tuple.
@@ -351,7 +353,7 @@ object CLayer {
    * release actions will be performed uninterruptibly.
    */
   def fromAcquireRelease[R, A: Tag](acquire: ZIO[R, A])(release: A => URIO[R, Any]): CLayer[F,R, Has[A]] =
-    fromManaged(ZManaged.make(acquire)(release))
+    fromManaged(Managed.make(acquire)(release))
 
   /**
    * Constructs a layer from acquire and release actions, which must return one
@@ -359,7 +361,7 @@ object CLayer {
    * uninterruptibly.
    */
   def fromAcquireReleaseMany[R, A](acquire: ZIO[R, A])(release: A => URIO[R, Any]): CLayer[F,R, A] =
-    fromManagedMany(ZManaged.make(acquire)(release))
+    fromManagedMany(Managed.make(acquire)(release))
 
   /**
    * Constructs a layer from the specified effect.
@@ -372,7 +374,7 @@ object CLayer {
    * more services.
    */
   def fromEffectMany[R, A](zio: ZIO[R, A]): CLayer[F,R, A] =
-    FLayer(ZManaged.fromEffect(zio))
+    FLayer(Managed.fromEffect(zio))
 
   /**
    * Constructs a layer from the environment using the specified function.
@@ -391,8 +393,8 @@ object CLayer {
    * Constructs a layer from the environment using the specified effectful
    * resourceful function.
    */
-  def fromFunctionManaged[A, B: Tag](f: A => ZManaged[Any, B]): CLayer[F,A, Has[B]] =
-    fromManaged(ZManaged.fromFunctionM(f))
+  def fromFunctionManaged[A, B: Tag](f: A => Managed[Any, B]): CLayer[F,A, Has[B]] =
+    fromManaged(Managed.fromFunctionM(f))
 
   /**
    * Constructs a layer from the environment using the specified function,
@@ -405,15 +407,15 @@ object CLayer {
    * Constructs a layer from the environment using the specified effectful
    * function, which must return one or more services.
    */
-  def fromFunctionManyM[A, B](f: A => IO[E, B]): CLayer[F,A, B] =
+  def fromFunctionManyM[F[_], A, B](f: A => F[B]): CLayer[F,A, B] =
     fromFunctionManyManaged(a => f(a).toManaged_)
 
   /**
    * Constructs a layer from the environment using the specified effectful
    * resourceful function, which must return one or more services.
    */
-  def fromFunctionManyManaged[A, B](f: A => ZManaged[Any, B]): CLayer[F,A, B] =
-    FLayer(ZManaged.fromFunctionM(f))
+  def fromFunctionManyManaged[F[_], A, B](f: A => Managed[Any, B]): CLayer[F,A, B] =
+    CLayer(Managed.fromFunctionM(f))
 
   /**
    * Constructs a layer that purely depends on the specified service.
@@ -851,7 +853,7 @@ object CLayer {
    * Constructs a layer that resourcefully and effectfully depends on the
    * specified service.
    */
-  def fromServiceManaged[A: Tag, R, B: Tag](f: A => ZManaged[R, B]): CLayer[F,R with Has[A], Has[B]] =
+  def fromServiceManaged[A: Tag, R, B: Tag](f: A => Managed[R, B]): CLayer[F,R with Has[A], Has[B]] =
     fromServiceManyManaged(a => f(a).asService)
 
   /**
@@ -859,7 +861,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, R, B: Tag](
-    f: (A0, A1) => ZManaged[R, B]
+    f: (A0, A1) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -870,7 +872,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, R, B: Tag](
-    f: (A0, A1, A2) => ZManaged[R, B]
+    f: (A0, A1, A2) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -881,7 +883,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3) => ZManaged[R, B]
+    f: (A0, A1, A2, A3) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -892,7 +894,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -903,7 +905,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -914,7 +916,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -925,7 +927,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -936,7 +938,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -947,7 +949,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -958,7 +960,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -969,7 +971,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -980,7 +982,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -991,7 +993,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -1002,7 +1004,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -1013,7 +1015,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -1024,7 +1026,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -1035,7 +1037,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, A17: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16] with Has[A17], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -1046,7 +1048,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, A17: Tag, A18: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16] with Has[A17] with Has[A18], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -1057,7 +1059,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, A17: Tag, A18: Tag, A19: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16] with Has[A17] with Has[A18] with Has[A19], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -1068,7 +1070,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, A17: Tag, A18: Tag, A19: Tag, A20: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16] with Has[A17] with Has[A18] with Has[A19] with Has[A20], Has[B]] =
     fromServicesManyManaged[A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, R, Has[B]]((a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20) => f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20).asService)
 
@@ -1077,7 +1079,7 @@ object CLayer {
    * specified services.
    */
   def fromServicesManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, A17: Tag, A18: Tag, A19: Tag, A20: Tag, A21: Tag, R, B: Tag](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16] with Has[A17] with Has[A18] with Has[A19] with Has[A20] with Has[A21], Has[B]] = {
     val layer = fromServicesManyManaged(andThen(f)(_.asService))
     layer
@@ -1608,8 +1610,8 @@ object CLayer {
    * specified service, which must return one or more services. For the more
    * common variant that returns a single service see `fromServiceManaged`.
    */
-  def fromServiceManyManaged[A: Tag, R, B](f: A => ZManaged[R, B]): CLayer[F,R with Has[A], B] =
-    FLayer(ZManaged.accessManaged[R with Has[A]](m => f(m.get[A])))
+  def fromServiceManyManaged[A: Tag, R, B](f: A => Managed[R, B]): CLayer[F,R with Has[A], B] =
+    FLayer(Managed.accessManaged[R with Has[A]](m => f(m.get[A])))
 
   /**
    * Constructs a layer that resourcefully and effectfully depends on the
@@ -1617,12 +1619,12 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, R, B](
-    f: (A0, A1) => ZManaged[R, B]
+    f: (A0, A1) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1], B] =
     FLayer {
       for {
-        a0 <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1 <- ZManaged.environment[Has[A1]].map(_.get[A1])
+        a0 <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1 <- Managed.environment[Has[A1]].map(_.get[A1])
         b  <- f(a0, a1)
       } yield b
     }
@@ -1633,13 +1635,13 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, R, B](
-    f: (A0, A1, A2) => ZManaged[R, B]
+    f: (A0, A1, A2) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2], B] =
     FLayer {
       for {
-        a0 <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1 <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2 <- ZManaged.environment[Has[A2]].map(_.get[A2])
+        a0 <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1 <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2 <- Managed.environment[Has[A2]].map(_.get[A2])
         b  <- f(a0, a1, a2)
       } yield b
     }
@@ -1650,14 +1652,14 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, R, B](
-    f: (A0, A1, A2, A3) => ZManaged[R, B]
+    f: (A0, A1, A2, A3) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3], B] =
     FLayer {
       for {
-        a0 <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1 <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2 <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3 <- ZManaged.environment[Has[A3]].map(_.get[A3])
+        a0 <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1 <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2 <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3 <- Managed.environment[Has[A3]].map(_.get[A3])
         b  <- f(a0, a1, a2, a3)
       } yield b
     }
@@ -1668,15 +1670,15 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, R, B](
-    f: (A0, A1, A2, A3, A4) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4], B] =
     FLayer {
       for {
-        a0 <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1 <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2 <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3 <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4 <- ZManaged.environment[Has[A4]].map(_.get[A4])
+        a0 <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1 <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2 <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3 <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4 <- Managed.environment[Has[A4]].map(_.get[A4])
         b  <- f(a0, a1, a2, a3, a4)
       } yield b
     }
@@ -1687,16 +1689,16 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5], B] =
     FLayer {
       for {
-        a0 <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1 <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2 <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3 <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4 <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5 <- ZManaged.environment[Has[A5]].map(_.get[A5])
+        a0 <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1 <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2 <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3 <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4 <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5 <- Managed.environment[Has[A5]].map(_.get[A5])
         b  <- f(a0, a1, a2, a3, a4, a5)
       } yield b
     }
@@ -1707,17 +1709,17 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6], B] =
     FLayer {
       for {
-        a0 <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1 <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2 <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3 <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4 <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5 <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6 <- ZManaged.environment[Has[A6]].map(_.get[A6])
+        a0 <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1 <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2 <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3 <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4 <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5 <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6 <- Managed.environment[Has[A6]].map(_.get[A6])
         b  <- f(a0, a1, a2, a3, a4, a5, a6)
       } yield b
     }
@@ -1728,18 +1730,18 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7], B] =
     FLayer {
       for {
-        a0 <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1 <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2 <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3 <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4 <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5 <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6 <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7 <- ZManaged.environment[Has[A7]].map(_.get[A7])
+        a0 <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1 <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2 <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3 <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4 <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5 <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6 <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7 <- Managed.environment[Has[A7]].map(_.get[A7])
         b  <- f(a0, a1, a2, a3, a4, a5, a6, a7)
       } yield b
     }
@@ -1750,19 +1752,19 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8], B] =
     FLayer {
       for {
-        a0 <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1 <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2 <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3 <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4 <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5 <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6 <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7 <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8 <- ZManaged.environment[Has[A8]].map(_.get[A8])
+        a0 <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1 <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2 <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3 <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4 <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5 <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6 <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7 <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8 <- Managed.environment[Has[A8]].map(_.get[A8])
         b  <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8)
       } yield b
     }
@@ -1773,20 +1775,20 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9], B] =
     FLayer {
       for {
-        a0 <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1 <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2 <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3 <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4 <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5 <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6 <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7 <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8 <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9 <- ZManaged.environment[Has[A9]].map(_.get[A9])
+        a0 <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1 <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2 <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3 <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4 <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5 <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6 <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7 <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8 <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9 <- Managed.environment[Has[A9]].map(_.get[A9])
         b  <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9)
       } yield b
     }
@@ -1797,21 +1799,21 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10)
       } yield b
     }
@@ -1822,22 +1824,22 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11)
       } yield b
     }
@@ -1848,23 +1850,23 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
-        a12 <- ZManaged.environment[Has[A12]].map(_.get[A12])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
+        a12 <- Managed.environment[Has[A12]].map(_.get[A12])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12)
       } yield b
     }
@@ -1875,24 +1877,24 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
-        a12 <- ZManaged.environment[Has[A12]].map(_.get[A12])
-        a13 <- ZManaged.environment[Has[A13]].map(_.get[A13])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
+        a12 <- Managed.environment[Has[A12]].map(_.get[A12])
+        a13 <- Managed.environment[Has[A13]].map(_.get[A13])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13)
       } yield b
     }
@@ -1903,25 +1905,25 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
-        a12 <- ZManaged.environment[Has[A12]].map(_.get[A12])
-        a13 <- ZManaged.environment[Has[A13]].map(_.get[A13])
-        a14 <- ZManaged.environment[Has[A14]].map(_.get[A14])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
+        a12 <- Managed.environment[Has[A12]].map(_.get[A12])
+        a13 <- Managed.environment[Has[A13]].map(_.get[A13])
+        a14 <- Managed.environment[Has[A14]].map(_.get[A14])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14)
       } yield b
     }
@@ -1932,26 +1934,26 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
-        a12 <- ZManaged.environment[Has[A12]].map(_.get[A12])
-        a13 <- ZManaged.environment[Has[A13]].map(_.get[A13])
-        a14 <- ZManaged.environment[Has[A14]].map(_.get[A14])
-        a15 <- ZManaged.environment[Has[A15]].map(_.get[A15])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
+        a12 <- Managed.environment[Has[A12]].map(_.get[A12])
+        a13 <- Managed.environment[Has[A13]].map(_.get[A13])
+        a14 <- Managed.environment[Has[A14]].map(_.get[A14])
+        a15 <- Managed.environment[Has[A15]].map(_.get[A15])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15)
       } yield b
     }
@@ -1962,27 +1964,27 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
-        a12 <- ZManaged.environment[Has[A12]].map(_.get[A12])
-        a13 <- ZManaged.environment[Has[A13]].map(_.get[A13])
-        a14 <- ZManaged.environment[Has[A14]].map(_.get[A14])
-        a15 <- ZManaged.environment[Has[A15]].map(_.get[A15])
-        a16 <- ZManaged.environment[Has[A16]].map(_.get[A16])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
+        a12 <- Managed.environment[Has[A12]].map(_.get[A12])
+        a13 <- Managed.environment[Has[A13]].map(_.get[A13])
+        a14 <- Managed.environment[Has[A14]].map(_.get[A14])
+        a15 <- Managed.environment[Has[A15]].map(_.get[A15])
+        a16 <- Managed.environment[Has[A16]].map(_.get[A16])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16)
       } yield b
     }
@@ -1993,28 +1995,28 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, A17: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16] with Has[A17], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
-        a12 <- ZManaged.environment[Has[A12]].map(_.get[A12])
-        a13 <- ZManaged.environment[Has[A13]].map(_.get[A13])
-        a14 <- ZManaged.environment[Has[A14]].map(_.get[A14])
-        a15 <- ZManaged.environment[Has[A15]].map(_.get[A15])
-        a16 <- ZManaged.environment[Has[A16]].map(_.get[A16])
-        a17 <- ZManaged.environment[Has[A17]].map(_.get[A17])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
+        a12 <- Managed.environment[Has[A12]].map(_.get[A12])
+        a13 <- Managed.environment[Has[A13]].map(_.get[A13])
+        a14 <- Managed.environment[Has[A14]].map(_.get[A14])
+        a15 <- Managed.environment[Has[A15]].map(_.get[A15])
+        a16 <- Managed.environment[Has[A16]].map(_.get[A16])
+        a17 <- Managed.environment[Has[A17]].map(_.get[A17])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17)
       } yield b
     }
@@ -2025,29 +2027,29 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, A17: Tag, A18: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16] with Has[A17] with Has[A18], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
-        a12 <- ZManaged.environment[Has[A12]].map(_.get[A12])
-        a13 <- ZManaged.environment[Has[A13]].map(_.get[A13])
-        a14 <- ZManaged.environment[Has[A14]].map(_.get[A14])
-        a15 <- ZManaged.environment[Has[A15]].map(_.get[A15])
-        a16 <- ZManaged.environment[Has[A16]].map(_.get[A16])
-        a17 <- ZManaged.environment[Has[A17]].map(_.get[A17])
-        a18 <- ZManaged.environment[Has[A18]].map(_.get[A18])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
+        a12 <- Managed.environment[Has[A12]].map(_.get[A12])
+        a13 <- Managed.environment[Has[A13]].map(_.get[A13])
+        a14 <- Managed.environment[Has[A14]].map(_.get[A14])
+        a15 <- Managed.environment[Has[A15]].map(_.get[A15])
+        a16 <- Managed.environment[Has[A16]].map(_.get[A16])
+        a17 <- Managed.environment[Has[A17]].map(_.get[A17])
+        a18 <- Managed.environment[Has[A18]].map(_.get[A18])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18)
       } yield b
     }
@@ -2058,30 +2060,30 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, A17: Tag, A18: Tag, A19: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16] with Has[A17] with Has[A18] with Has[A19], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
-        a12 <- ZManaged.environment[Has[A12]].map(_.get[A12])
-        a13 <- ZManaged.environment[Has[A13]].map(_.get[A13])
-        a14 <- ZManaged.environment[Has[A14]].map(_.get[A14])
-        a15 <- ZManaged.environment[Has[A15]].map(_.get[A15])
-        a16 <- ZManaged.environment[Has[A16]].map(_.get[A16])
-        a17 <- ZManaged.environment[Has[A17]].map(_.get[A17])
-        a18 <- ZManaged.environment[Has[A18]].map(_.get[A18])
-        a19 <- ZManaged.environment[Has[A19]].map(_.get[A19])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
+        a12 <- Managed.environment[Has[A12]].map(_.get[A12])
+        a13 <- Managed.environment[Has[A13]].map(_.get[A13])
+        a14 <- Managed.environment[Has[A14]].map(_.get[A14])
+        a15 <- Managed.environment[Has[A15]].map(_.get[A15])
+        a16 <- Managed.environment[Has[A16]].map(_.get[A16])
+        a17 <- Managed.environment[Has[A17]].map(_.get[A17])
+        a18 <- Managed.environment[Has[A18]].map(_.get[A18])
+        a19 <- Managed.environment[Has[A19]].map(_.get[A19])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19)
       } yield b
     }
@@ -2092,31 +2094,31 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, A17: Tag, A18: Tag, A19: Tag, A20: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16] with Has[A17] with Has[A18] with Has[A19] with Has[A20], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
-        a12 <- ZManaged.environment[Has[A12]].map(_.get[A12])
-        a13 <- ZManaged.environment[Has[A13]].map(_.get[A13])
-        a14 <- ZManaged.environment[Has[A14]].map(_.get[A14])
-        a15 <- ZManaged.environment[Has[A15]].map(_.get[A15])
-        a16 <- ZManaged.environment[Has[A16]].map(_.get[A16])
-        a17 <- ZManaged.environment[Has[A17]].map(_.get[A17])
-        a18 <- ZManaged.environment[Has[A18]].map(_.get[A18])
-        a19 <- ZManaged.environment[Has[A19]].map(_.get[A19])
-        a20 <- ZManaged.environment[Has[A20]].map(_.get[A20])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
+        a12 <- Managed.environment[Has[A12]].map(_.get[A12])
+        a13 <- Managed.environment[Has[A13]].map(_.get[A13])
+        a14 <- Managed.environment[Has[A14]].map(_.get[A14])
+        a15 <- Managed.environment[Has[A15]].map(_.get[A15])
+        a16 <- Managed.environment[Has[A16]].map(_.get[A16])
+        a17 <- Managed.environment[Has[A17]].map(_.get[A17])
+        a18 <- Managed.environment[Has[A18]].map(_.get[A18])
+        a19 <- Managed.environment[Has[A19]].map(_.get[A19])
+        a20 <- Managed.environment[Has[A20]].map(_.get[A20])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20)
       } yield b
     }
@@ -2127,32 +2129,32 @@ object CLayer {
    * common variant that returns a single service see `fromServicesManaged`.
    */
   def fromServicesManyManaged[A0: Tag, A1: Tag, A2: Tag, A3: Tag, A4: Tag, A5: Tag, A6: Tag, A7: Tag, A8: Tag, A9: Tag, A10: Tag, A11: Tag, A12: Tag, A13: Tag, A14: Tag, A15: Tag, A16: Tag, A17: Tag, A18: Tag, A19: Tag, A20: Tag, A21: Tag, R, B](
-    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21) => ZManaged[R, B]
+    f: (A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21) => Managed[R, B]
   ): CLayer[F,R with Has[A0] with Has[A1] with Has[A2] with Has[A3] with Has[A4] with Has[A5] with Has[A6] with Has[A7] with Has[A8] with Has[A9] with Has[A10] with Has[A11] with Has[A12] with Has[A13] with Has[A14] with Has[A15] with Has[A16] with Has[A17] with Has[A18] with Has[A19] with Has[A20] with Has[A21], B] =
     FLayer {
       for {
-        a0  <- ZManaged.environment[Has[A0]].map(_.get[A0])
-        a1  <- ZManaged.environment[Has[A1]].map(_.get[A1])
-        a2  <- ZManaged.environment[Has[A2]].map(_.get[A2])
-        a3  <- ZManaged.environment[Has[A3]].map(_.get[A3])
-        a4  <- ZManaged.environment[Has[A4]].map(_.get[A4])
-        a5  <- ZManaged.environment[Has[A5]].map(_.get[A5])
-        a6  <- ZManaged.environment[Has[A6]].map(_.get[A6])
-        a7  <- ZManaged.environment[Has[A7]].map(_.get[A7])
-        a8  <- ZManaged.environment[Has[A8]].map(_.get[A8])
-        a9  <- ZManaged.environment[Has[A9]].map(_.get[A9])
-        a10 <- ZManaged.environment[Has[A10]].map(_.get[A10])
-        a11 <- ZManaged.environment[Has[A11]].map(_.get[A11])
-        a12 <- ZManaged.environment[Has[A12]].map(_.get[A12])
-        a13 <- ZManaged.environment[Has[A13]].map(_.get[A13])
-        a14 <- ZManaged.environment[Has[A14]].map(_.get[A14])
-        a15 <- ZManaged.environment[Has[A15]].map(_.get[A15])
-        a16 <- ZManaged.environment[Has[A16]].map(_.get[A16])
-        a17 <- ZManaged.environment[Has[A17]].map(_.get[A17])
-        a18 <- ZManaged.environment[Has[A18]].map(_.get[A18])
-        a19 <- ZManaged.environment[Has[A19]].map(_.get[A19])
-        a20 <- ZManaged.environment[Has[A20]].map(_.get[A20])
-        a21 <- ZManaged.environment[Has[A21]].map(_.get[A21])
+        a0  <- Managed.environment[Has[A0]].map(_.get[A0])
+        a1  <- Managed.environment[Has[A1]].map(_.get[A1])
+        a2  <- Managed.environment[Has[A2]].map(_.get[A2])
+        a3  <- Managed.environment[Has[A3]].map(_.get[A3])
+        a4  <- Managed.environment[Has[A4]].map(_.get[A4])
+        a5  <- Managed.environment[Has[A5]].map(_.get[A5])
+        a6  <- Managed.environment[Has[A6]].map(_.get[A6])
+        a7  <- Managed.environment[Has[A7]].map(_.get[A7])
+        a8  <- Managed.environment[Has[A8]].map(_.get[A8])
+        a9  <- Managed.environment[Has[A9]].map(_.get[A9])
+        a10 <- Managed.environment[Has[A10]].map(_.get[A10])
+        a11 <- Managed.environment[Has[A11]].map(_.get[A11])
+        a12 <- Managed.environment[Has[A12]].map(_.get[A12])
+        a13 <- Managed.environment[Has[A13]].map(_.get[A13])
+        a14 <- Managed.environment[Has[A14]].map(_.get[A14])
+        a15 <- Managed.environment[Has[A15]].map(_.get[A15])
+        a16 <- Managed.environment[Has[A16]].map(_.get[A16])
+        a17 <- Managed.environment[Has[A17]].map(_.get[A17])
+        a18 <- Managed.environment[Has[A18]].map(_.get[A18])
+        a19 <- Managed.environment[Has[A19]].map(_.get[A19])
+        a20 <- Managed.environment[Has[A20]].map(_.get[A20])
+        a21 <- Managed.environment[Has[A21]].map(_.get[A21])
         b   <- f(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21)
       } yield b
     }
@@ -2160,14 +2162,14 @@ object CLayer {
   /**
    * Constructs a layer from a managed resource.
    */
-  def fromManaged[R, A: Tag](m: ZManaged[R, A]): CLayer[F,R, Has[A]] =
+  def fromManaged[R, A: Tag](m: Managed[R, A]): CLayer[F,R, Has[A]] =
     FLayer(m.asService)
 
   /**
    * Constructs a layer from a managed resource, which must return one or more
    * services.
    */
-  def fromManagedMany[R, A](m: ZManaged[R, A]): CLayer[F,R, A] =
+  def fromManagedMany[R, A](m: Managed[R, A]): CLayer[F,R, A] =
     FLayer(m)
 
   /**
@@ -2181,7 +2183,7 @@ object CLayer {
    * output.
    */
   def requires[A]: CLayer[F,A, Nothing, A] =
-    FLayer(ZManaged.environment[A])
+    FLayer(Managed.environment[A])
 
   /**
    * A layer that passes along the second element of a tuple.
@@ -2194,20 +2196,20 @@ object CLayer {
    * the environment.
    */
   def service[A]: CLayer[F,Has[A], Nothing, Has[A]] =
-    FLayer(ZManaged.environment[Has[A]])
+    FLayer(Managed.environment[Has[A]])
 
   /**
    * Constructs a layer from the specified value.
    */
   def succeed[A: Tag](a: A): ULayer[Has[A]] =
-    FLayer(ZManaged.succeedNow(Has(a)))
+    FLayer(Managed.succeedNow(Has(a)))
 
   /**
    * Constructs a layer from the specified value, which must return one or more
    * services.
    */
   def succeedMany[A](a: A): ULayer[A] =
-    FLayer(ZManaged.succeedNow(a))
+    FLayer(Managed.succeedNow(a))
 
   /**
     * Lazily constructs a layer. This is useful to avoid infinite recursion when
@@ -2248,7 +2250,7 @@ object CLayer {
      * returns it. Otherwise, obtains the dependency, stores it in the memo map,
      * and adds a finalizer to the outer `Managed`.
      */
-    def getOrElseMemoize[E, A, B](layer: CLayer[F,A, B]): ZManaged[A, B]
+    def getOrElseMemoize[E, A, B](layer: CLayer[F,A, B]): Managed[A, B]
   }
 
   private object MemoMap {
@@ -2256,13 +2258,13 @@ object CLayer {
     /**
      * Constructs an empty memo map.
      */
-    def make: UIO[MemoMap] =
+    def make[F[_]: Sync]: F[MemoMap] =
       RefM
-        .make[Map[CLayer[F,Nothing, Any, Any], (IO[Any, Any], ZManaged.Finalizer)]](Map.empty)
+        .make[Map[CLayer[F,Nothing, Any, Any], (IO[Any, Any], Managed.Finalizer)]](Map.empty)
         .map { ref =>
           new MemoMap { self =>
-            final def getOrElseMemoize[E, A, B](layer: CLayer[F,A, B]): ZManaged[A, B] =
-              ZManaged {
+            final def getOrElseMemoize[E, A, B](layer: CLayer[F,A, B]): Managed[A, B] =
+              Managed {
                 ref.modify { map =>
                   map.get(layer) match {
                     case Some((acquire, release)) =>
@@ -2284,13 +2286,13 @@ object CLayer {
                       for {
                         observers    <- Ref.make(0)
                         promise      <- Promise.make[E, B]
-                        finalizerRef <- Ref.make[ZManaged.Finalizer](ZManaged.Finalizer.noop)
+                        finalizerRef <- Ref.make[Managed.Finalizer](Managed.Finalizer.noop)
 
                         resource = ZIO.uninterruptibleMask { restore =>
                           for {
                             env                  <- ZIO.environment[(A, ReleaseMap)]
                             (a, outerReleaseMap) = env
-                            innerReleaseMap      <- ZManaged.ReleaseMap.make
+                            innerReleaseMap      <- Managed.ReleaseMap.make
                             tp <- restore(layer.scope.flatMap(_.apply(self)).zio.provide((a, innerReleaseMap))).run.flatMap {
                                    case e @ Exit.Failure(cause) =>
                                      promise.halt(cause) *> innerReleaseMap.releaseAll(e, ExecutionStrategy.Sequential) *> ZIO
