@@ -9,4 +9,7 @@ package object clayer  extends Tags  {
     def apply[F[_]](implicit F: Raise[F]): Raise[F] = F
   }
   type Finalizer[F[_]] = Resource.ExitCase => F[Unit]
+
+
+  type Managed[F, A, B] = A => Resource[F, B]
 }

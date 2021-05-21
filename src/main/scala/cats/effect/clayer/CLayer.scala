@@ -151,7 +151,7 @@ import cats.syntax.all._
   final def orElse[RIn1 <: RIn, ROut1 >: ROut](
     that: Layer[RIn1, ROut1]
   ): Layer[RIn1, ROut1] =
-    catchAll(Layer.first >>> that)
+    catchAll(CLayer.first >>> that)
 
 
   /**
@@ -195,7 +195,7 @@ import cats.syntax.all._
 }
 
 object CLayer {
-  def zipWith[F[_], RIn, ROut1, ROut2, ROut3](self: CLayer[F, RIn, ROut1], right: CLayer[F, RIn, ROut2])(f: (ROut1, ROut2) => ROut3): CLayer[F, RIn, ROut3] = {
+  def zipWith[F[_], RIn, ROut1, ROut2, ROut3](self: CLayer[F, RIn, ROut1], that: CLayer[F, RIn, ROut2])(f: (ROut1, ROut2) => ROut3): CLayer[F, RIn, ROut3] = {
     val newReader = self.reader.flatMap { out =>
       that.reader(out).map(out2 => ev.union(out, out2))
     }
@@ -203,7 +203,7 @@ object CLayer {
   }
 
   def fromFunctionMany[F[_]: Applicative, A, B](f: A => B): CLayer[F, A, B] = {
-    fromFunctionManyM(f.map(App))
+    fromFunctionManyM(f.map(Applicative[F].pure))
   }
 
   def fromFunctionManyM[F[_], A, B](f: A => F[B]): CLayer[F, A, B] = {
@@ -214,18 +214,20 @@ object CLayer {
     new CLayer(Kleisli(f))
   }
 
-  trait MemoMap {
-    def toManaged_ : Resource[F, MemoMap] = ???
+  trait MemoMap[F[_]] {
+    def toManaged_ : Resource[F, MemoMap[F]] = ???
   }
 
   object MemoMap {
-    def make[F[_]]: F[MemoMap] = ???
+    def make[F[_]]: F[MemoMap[F]] = ???
   }
 
-  def identity[F[_], A]: CLayer[F, A, A] = requires[A]
+  def identity[F[_]: Applicative, A]: CLayer[F, A, A] = requires[F, A]
 
-  def requires[F[_]: Applicative, A]: CLayer[FA, A] = {
+  def requires[F[_]: Applicative, A]: CLayer[F, A, A] = {
     fromFunctionManyM(Applicative[F].pure)
   }
+
+
 
 }
