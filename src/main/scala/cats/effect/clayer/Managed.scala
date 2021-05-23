@@ -2,7 +2,9 @@ package cats.effect.clayer
 
 import cats.effect._
 
-abstract class ReleaseMap[F[_]] {
+object Managed {
+
+  abstract class ReleaseMap[F[_]] {
 
     /**
      * An opaque identifier for a finalizer stored in the map.
@@ -59,3 +61,4 @@ abstract class ReleaseMap[F[_]] {
      */
     def replace(key: Key, finalizer: Finalizer[F]): F[Option[Finalizer[F]]]
   }
+}

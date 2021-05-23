@@ -11,5 +11,5 @@ package object clayer  extends Tags  {
   type Finalizer[F[_]] = Resource.ExitCase => F[Unit]
 
 
-  type Managed[F, A, B] = A => Resource[F, B]
+  type Managed[F[_], -A, +B] = ReaderT[Resource[F, *], A, B]
 }
