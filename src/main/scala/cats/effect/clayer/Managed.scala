@@ -38,6 +38,14 @@ trait ManagedSyntax {
 
 object Managed {
 
+  def make[F[_], R, A](acquire: R => F[A])(release: A => R => F[Any]): Managed[F, R, A] = {
+    ???
+  }
+
+  def fail[F[_]: MonadError[*[_], Throwable]](e: Throwable): Managed[F, Any, Nothing] = {
+    MonadError[F, Throwable].raiseError(e)
+  }
+
   def environment[F[_], R]: Managed[F, R, R] =
     fromFunction(identity[R])
 
@@ -49,7 +57,7 @@ object Managed {
     evalFunction(f.andThen(Applicative[F].pure))
   }
 
-  def evalFunction[F, R, A](fa: R => F[A]): Managed[F, R, A] = {
+  def evalFunction[F[_], R, A](fa: R => F[A]): Managed[F, R, A] = {
     Managed(fa.andThen(Resource.eval[F]))
   }
 

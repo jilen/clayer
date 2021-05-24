@@ -293,7 +293,7 @@ object CLayer {
   /**
    * Constructs a layer that fails with the specified value.
    */
-  def fail[F[_]](e: Throwable): CLayer[F,Any,  Nothing] =
+  def fail[F[_]: Async: Parallel](e: Throwable): CLayer[F,Any,  Nothing] =
     CLayer(Managed.fail(e))
 
 
@@ -312,49 +312,49 @@ object CLayer {
      * Constructs a layer from acquire and release actions. The acquire and
      * release actions will be performed uninterruptibly.
      */
-    def fromAcquireRelease[R,  A: Tag](acquire: ZIO[R,  A])(release: A => URIO[R, Any]): CLayer[R,  Has[A]] =
-      fromManaged(ZManaged.make(acquire)(release))
+    def fromAcquireRelease[R,  A: Tag](acquire: R =>  F[A])(release: A => R => F[Any]): CLayer[F, R,  Has[A]] =
+      fromManaged(Managed.make(acquire)(release))
 
     /**
      * Constructs a layer from acquire and release actions, which must return one
      * or more services. The acquire and release actions will be performed
      * uninterruptibly.
      */
-    def fromAcquireReleaseMany[R,  A](acquire: ZIO[R,  A])(release: A => URIO[R, Any]): CLayer[R,  A] =
-      fromManagedMany(ZManaged.make(acquire)(release))
+    def fromAcquireReleaseMany[R,  A](acquire: R => F[A])(release: A => R => F[Any]): CLayer[F, R,  A] =
+      fromManagedMany(Managed.make(acquire)(release))
 
     /**
      * Constructs a layer from the specified effect.
      */
-    def fromEffect[R,  A: Tag](zio: ZIO[R,  A]): CLayer[R,  Has[A]] =
+    def fromEffect[F[_], R,  A: Tag](zio: R => F[A]): CLayer[F, R,  Has[A]] =
       fromEffectMany(zio.asService)
 
     /**
      * Constructs a layer from the specified effect, which must return one or
      * more services.
      */
-    def fromEffectMany[R,  A](zio: ZIO[R,  A]): CLayer[R,  A] =
-      CLayer(ZManaged.fromEffect(zio))
+    def fromEffectMany[F[_]: Async: Parallel, R,  A](f: R => F[A]): CLayer[F, R,  A] =
+      CLayer(Managed.evalFunction(f))
 
     /**
      * Constructs a layer from the environment using the specified function.
      */
-    def fromFunction[A, B: Tag](f: A => B): CLayer[F, A, Has[B]] =
-      fromFunctionM(a => ZIO.succeedNow(f(a)))
+    def fromFunction[F[_]: Async: Parallel, A, B: Tag](f: A => B): CLayer[F, A, Has[B]] =
+      fromFunctionM(a => Applicative[F].pure(f(a)))
 
     /**
      * Constructs a layer from the environment using the specified effectful
      * function.
      */
-    def fromFunctionM[A,  B: Tag](f: A => F[B]): CLayer[A,  Has[B]] =
-      fromFunctionManaged(a => f(a).toManaged_)
+    def fromFunctionM[F[_], A,  B: Tag](f: A => F[B]): CLayer[F, A,  Has[B]] =
+      fromFunctionManaged(a => Managed.eval(f(a)))
 
     /**
      * Constructs a layer from the environment using the specified effectful
      * resourceful function.
      */
-    def fromFunctionManaged[A,  B: Tag](f: A => ZManaged[Any,  B]): CLayer[A,  Has[B]] =
-      fromManaged(ZManaged.fromFunctionM(f))
+    def fromFunctionManaged[F[_], A,  B: Tag](f: A => Managed[F, Any,  B]): CLayer[F, A,  Has[B]] =
+      fromManaged(Managed.fromFunctionM(f))
 
     /**
      * Constructs a layer from the environment using the specified function,
@@ -383,14 +383,14 @@ object CLayer {
     /**
      * Constructs a layer from a managed resource.
      */
-    def fromManaged[R,  A: Tag](m: ZManaged[R,  A]): CLayer[R,  Has[A]] =
+    def fromManaged[F[_], R,  A: Tag](m: Managed[F, R,  A]): CLayer[F, R,  Has[A]] =
       CLayer(m.asService)
 
     /**
      * Constructs a layer from a managed resource, which must return one or more
      * services.
      */
-    def fromManagedMany[R,  A](m: ZManaged[R,  A]): CLayer[R,  A] =
+    def fromManagedMany[F[_], R,  A](m: Managed[F, R,  A]): CLayer[F, R,  A] =
       CLayer(m)
 
     /**
