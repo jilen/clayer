@@ -1,8 +1,45 @@
 package cats.effect.clayer
 
+import cats._
 import cats.effect._
 
+trait ManagedSyntax {
+  implicit class ManagedOps[F[_], A, B](_reader: Managed[F,A, B]) {
+    def provide[R](r: R): Managed[F, Any, A] = {
+    }
+
+    def provideSome[R0](f: R0 => R)(implicit ev: NeedsEnv[R]): Managed[R0, A] = {
+      val newR = _reader.contramap[(R0, Managed.ReleaseMap)](tp => f(tp._1) -> tp._2)
+      Managed(newR)
+    }
+
+    def useForever: A => F[Nothing]
+
+    def use[R1 <: A, B](f: A => (R1 => F[B])): R1 => F[B] = {
+      ???
+    }
+  }
+}
+
 object Managed {
+
+  def fromFunction[F[_]: Applicative, R, A](f: R => A) = {
+    evalFunction(f.andThen(Applicative[F].pure))
+  }
+
+  def evalFunction[F, R, A](fa: R => F[A]): Managed[F, R, A] = {
+    Managed(fa.andThen(Resource.eval[F]))
+  }
+
+  def eval[F[_], A](fa: F[A]): Managed[F, Any, A] = {
+    evalFunction(_ => fa)
+  }
+
+
+  object ReleaseMap {
+    def make[F[_]]: F[ReleaseMap[F]] = ???
+  }
+
 
   abstract class ReleaseMap[F[_]] {
 
