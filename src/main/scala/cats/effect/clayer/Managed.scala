@@ -4,24 +4,46 @@ import cats._
 import cats.effect._
 
 trait ManagedSyntax {
-  implicit class ManagedOps[F[_], A, B](_reader: Managed[F,A, B]) {
-    def provide[R](r: R): Managed[F, Any, A] = {
+  implicit class ManagedOps[F[_], R, A](self: Managed[F, R, A]) {
+    def provide[R](r: R)(implicit ev: NeedsEnv[R]): Managed[F, Any, A] = {
+      ???
     }
 
     def provideSome[R0](f: R0 => R)(implicit ev: NeedsEnv[R]): Managed[R0, A] = {
-      val newR = _reader.contramap[(R0, Managed.ReleaseMap)](tp => f(tp._1) -> tp._2)
+      val newR = self.contramap[(R0, Managed.ReleaseMap)](tp => f(tp._1) -> tp._2)
       Managed(newR)
     }
 
-    def useForever: A => F[Nothing]
+    def useForever: R => F[Nothing]
 
-    def use[R1 <: A, B](f: A => (R1 => F[B])): R1 => F[B] = {
+    def use[R1 <: R, A](f: R => (R1 => F[A])): R1 => F[A] = {
       ???
     }
+
+    def memoize: Managed[F, Any, Managed[F, R, A]] = {
+      ???
+    }
+
+    def zipWith[R1 <: R, A1, A2](that: Managed[F, R1, A1])(f: (A, A1) => A2): Managed[F, R1, A2] = {
+      (self, that).mapN(f)
+    }
+
+    def zipWithPar[R1 <: R, A1, A2](that: Managed[F, R1, A1])(f: (A, A1) => A2): Managed[F, R1, A2] = {
+      (self, that).parMapN(f)
+    }
+
+
   }
 }
 
 object Managed {
+
+  def environment[F[_], R]: Managed[F, R, R] =
+    fromFunction(identity[R])
+
+  def succeed[F[_], A](r: => A): Managed[F, Any, A] = {
+      fromFunction(_ => r)
+    }
 
   def fromFunction[F[_]: Applicative, R, A](f: R => A) = {
     evalFunction(f.andThen(Applicative[F].pure))

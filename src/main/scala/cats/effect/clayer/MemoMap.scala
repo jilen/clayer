@@ -10,7 +10,7 @@ private[clayer] abstract class MemoMap[F[_]] { self =>
    * returns it. Otherwise, obtains the dependency, stores it in the memo map,
    * and adds a finalizer to the outer `Managed`.
    */
-  def getOrElseMemoize[ A, B](layer: CLayer[A,  B]): ZManaged[A,  B]
+  def getOrElseMemoize[A, B](layer: CLayer[F, A,  B]): Managed[F, A,  B]
 }
 
 private[clayer] object MemoMap {

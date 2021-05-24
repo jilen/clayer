@@ -178,41 +178,18 @@ sealed abstract class CLayer[F[_], -RIn, +ROut](implicit F: Async[F], P: Paralle
   ): Layer[RIn1,  ROut1] =
     catchAll(bundle.first >>> that)
 
-  /**
-   * Retries constructing this layer according to the specified schedule.
-   */
-  final def retry[RIn1 <: RIn with clock.Clock](schedule: Schedule[RIn1, E, Any]): Layer[RIn1, E, ROut] = {
-    import Schedule.StepFunction
-    import Schedule.Decision._
-
-    type S = StepFunction[RIn1, E, Any]
-
-    lazy val loop: Layer[(RIn1, S), E, ROut] =
-      (bundle.first >>> self).catchAll {
-        val update: Layer[((RIn1, S), E), E, (RIn1, S)] =
-          bundle.fromFunctionManyM {
-            case ((r, s), e) =>
-              clock.currentDateTime.orDie.flatMap(now => s(now, e).flatMap {
-                case Done(_) => ZIO.fail(e)
-                case Continue(_, interval, next) => clock.sleep(Duration.fromInterval(now, interval)) as ((r, next))
-              }).provide(r)
-          }
-        update >>> bundle.suspend(loop.fresh)
-      }
-    bundle.identity <&> bundle.fromEffectMany(ZIO.succeed(schedule.step)) >>> loop
-  }
 
   /**
     * Performs the specified effect if this layer succeeds.
     */
-  final def tap[RIn1 <: RIn, E1 >: E](f: ROut => ZIO[RIn1,  Any]): Layer[RIn1,  ROut] =
-    bundle.identity <&> self >>> bundle.fromFunctionManyM { case (in, out) => f(out).provide(in) *> ZIO.succeed(out) }
+  final def tap[RIn1 <: RIn](f: ROut => RIn1 => F[Any]): Layer[RIn1,  ROut] =
+    bundle.identity <&> self >>> bundle.fromFunctionManyM { case (in, out) => f(out)(in) *> F.pure(out) }
 
   /**
    * Performs the specified effect if this layer fails.
    */
-  final def tapError[RIn1 <: RIn, E1 >: E](f: E => ZIO[RIn1,  Any]): Layer[RIn1,  ROut] =
-    catchAll(bundle.fromFunctionManyM { case (r, e) => f(e).provide(r) *> ZIO.fail(e) })
+  final def tapError[RIn1 <: RIn](f: Throwable => RIn1 => F[Any]): Layer[RIn1,  ROut] =
+    catchAll(bundle.fromFunctionManyM { case (r, e) => f(e)(r) *> F.raiseError(e) })
 
   /**
    * A named alias for `>>>`.
@@ -221,16 +198,9 @@ sealed abstract class CLayer[F[_], -RIn, +ROut](implicit F: Async[F], P: Paralle
     self >>> that
 
   /**
-   * Converts a layer that requires no services into a managed runtime, which
-   * can be used to execute effects.
-   */
-  final def toRuntime(p: Platform)(implicit ev: Any <:< RIn): Managed[E, Runtime[ROut]] =
-    build.provide(ev).map(Runtime(_, p))
-
-  /**
    * Updates one of the services output by this layer.
    */
-  final def update[A: Tag](f: A => A)(implicit ev1: Has.IsHas[ROut], ev2: ROut <:< Has[A]): Layer[RIn, E, ROut] =
+  final def update[A: Tag](f: A => A)(implicit ev1: Has.IsHas[ROut], ev2: ROut <:< Has[A]): Layer[RIn, ROut] =
     self >>> bundle.fromFunctionMany(ev1.update[ROut, A](_, f))
 
   /**
@@ -249,38 +219,38 @@ sealed abstract class CLayer[F[_], -RIn, +ROut](implicit F: Async[F], P: Paralle
   final def zipWithPar[ RIn2, ROut1 >: ROut, ROut2, ROut3](
     that: Layer[RIn2,  ROut2]
   )(f: (ROut, ROut2) => ROut3): Layer[RIn with RIn2,  ROut3] =
-    bundle.ZipWithPar(self, that, f)
+    CLayer.ZipWithPar(self, that, f)
 
   /**
     * Returns whether this layer is a fresh version that will not be shared.
     */
   private final def isFresh: Boolean =
     self match {
-      case bundle.Fresh(_) => true
+      case CLayer.Fresh(_) => true
       case _ => false
     }
 
   private final def scope: Managed[F, Nothing, MemoMap[F] => Managed[F, RIn, ROut]] =
     self match {
-      case bundle.Fold(self, failure, success) =>
-        ZManaged.succeed(memoMap =>
+      case CLayer.Fold(self, failure, success) =>
+        Managed.succeed {memoMap =>
           memoMap
             .getOrElseMemoize(self)
-            .foldCauseM(
-              e => ZManaged.environment[RIn].flatMap(r => memoMap.getOrElseMemoize(failure).provide((r, e))),
+            .redeemWith(
+              e => Managed.environment[F, RIn].flatMap(r => memoMap.getOrElseMemoize(failure).provide((r, e))),
               r => memoMap.getOrElseMemoize(success).provide(r)(NeedsEnv.needsEnv)
             )
-        )
-      case bundle.Fresh(self) =>
+        }
+      case CLayer.Fresh(self) =>
         Managed.succeed(_ => self.build)
-      case bundle.Managed(self) =>
+      case CLayer.ManagedLayer(self) =>
         Managed.succeed(_ => self)
-      case bundle.Suspend(self) =>
-         ZManaged.succeed(memoMap => memoMap.getOrElseMemoize(self()))
-      case bundle.ZipWith(self, that, f) =>
-        ZManaged.succeed(memoMap => memoMap.getOrElseMemoize(self).zipWith(memoMap.getOrElseMemoize(that))(f))
-      case bundle.ZipWithPar(self, that, f) =>
-        ZManaged.succeed(memoMap => memoMap.getOrElseMemoize(self).zipWithPar(memoMap.getOrElseMemoize(that))(f))
+      case CLayer.Suspend(self) =>
+        Managed.succeed(memoMap => memoMap.getOrElseMemoize(self()))
+      case CLayer.ZipWith(self, that, f) =>
+        Managed.succeed(memoMap => memoMap.getOrElseMemoize(self).zipWith(memoMap.getOrElseMemoize(that))(f))
+      case CLayer.ZipWithPar(self, that, f) =>
+        Managed.succeed(memoMap => memoMap.getOrElseMemoize(self).zipWithPar(memoMap.getOrElseMemoize(that))(f))
     }
 }
 
@@ -290,7 +260,7 @@ trait LayerFunctions[F[_]] {
 
 object CLayer {
 
-  def bundle[F[_]: Async: Parallel]: Bundle[F] = new Bundle {
+  def bundle[F[_]: Async: Parallel]: Bundle[F] = new Bundle[F] {
     def F = Async[F]
     def P = Parallel[F]
   }
@@ -301,7 +271,7 @@ object CLayer {
     success: CLayer[F, ROut,  ROut1]
   ) extends CLayer[F, RIn,  ROut1]
   private[clayer] final case class Fresh[F[_]: Async: Parallel, RIn,  ROut](self: CLayer[F, RIn,  ROut])        extends CLayer[F, RIn,  ROut]
-  private[clayer] final case class Managed[F[_]: Async: Parallel, -RIn, +ROut](self: Managed[F, RIn,  ROut]) extends CLayer[F, RIn,  ROut]
+  private[clayer] final case class ManagedLayer[F[_]: Async: Parallel, -RIn, +ROut](self: Managed[F, RIn,  ROut]) extends CLayer[F, RIn,  ROut]
   private[clayer] final case class Suspend[F[_]: Async: Parallel, -RIn, +ROut](self: () => CLayer[F, RIn,  ROut]) extends CLayer[F, RIn,  ROut]
   private[clayer] final case class ZipWith[F[_]: Async: Parallel, -RIn, +ROut, ROut2, ROut3](
     self: CLayer[F, RIn,  ROut],
@@ -309,8 +279,8 @@ object CLayer {
     f: (ROut, ROut2) => ROut3
   ) extends CLayer[F, RIn,  ROut3]
   private[clayer] final case class ZipWithPar[F[_]: Async: Parallel, -RIn, + ROut, ROut2, ROut3](
-    self: CLayer[RIn,  ROut],
-    that: CLayer[RIn,  ROut2],
+    self: CLayer[F, RIn,  ROut],
+    that: CLayer[F, RIn,  ROut2],
     f: (ROut, ROut2) => ROut3
   ) extends CLayer[F, RIn,  ROut3]
 
@@ -318,12 +288,12 @@ object CLayer {
    * Constructs a layer from a managed resource.
    */
   def apply[F[_]: Async: Parallel, RIn,  ROut](managed: Managed[F, RIn,  ROut]): CLayer[F, RIn,  ROut] =
-    Managed(managed)
+    ManagedLayer(managed)
 
   /**
    * Constructs a layer that fails with the specified value.
    */
-  def fail(e: Throwable): Layer[F, Nothing] =
+  def fail[F[_]](e: Throwable): CLayer[F,Any,  Nothing] =
     CLayer(Managed.fail(e))
 
 
@@ -471,7 +441,7 @@ object CLayer {
       Suspend(() => self)
     }
 
-    implicit final class CLayerPassthroughOps[RIn,  ROut](private val self: CLayer[RIn,  ROut]) extends AnyVal {
+    implicit final class CLayerPassthroughOps[RIn,  ROut](private val self: CLayer[F, RIn,  ROut]) extends AnyVal {
 
       /**
        * Returns a new layer that produces the outputs of this layer but also
@@ -481,7 +451,7 @@ object CLayer {
         bundle.identity[RIn] ++ self
     }
 
-    implicit final class CLayerProjectOps[R,  A](private val self: CLayer[R,  Has[A]]) extends AnyVal {
+    implicit final class CLayerProjectOps[R,  A](private val self: CLayer[F, R,  Has[A]]) extends AnyVal {
 
       /**
        * Projects out part of one of the layers output by this layer using the
