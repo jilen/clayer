@@ -8,7 +8,7 @@ import cats.effect._
 
 /**
  * A managed resource produced from an environment R
-*/
+ */
 final case class Managed[F[_], -R, +A](run: R => Resource[F, A]) { self =>
   def provide[R](r: R)(implicit ev: NeedsEnv[R]): Managed[F, Any, A] = {
     ???
@@ -71,12 +71,14 @@ final case class Managed[F[_], -R, +A](run: R => Resource[F, A]) { self =>
 
 
 trait ManagedInstances {
-   private[clayer] trait ManagedMonadError[F[_], A] extends MonadError[Managed[F, A, *], Throwable]  {
+  private[clayer] trait ManagedMonadError[F[_], A] extends MonadError[Managed[F, A, *], Throwable] with StackSafeMonad[Managed[F, A, *]] {
 
     type M[B] = Managed[F, A, B]
 
-     implicit def F: MonadError[F, Throwable]
-     implicit def MF = MonadError[Resource[F, *], Throwable]
+    implicit def F: MonadError[F, Throwable]
+    implicit def MF = MonadError[Resource[F, *], Throwable]
+
+    def pure[B](b: B): Managed[F, A, B] = Managed.succeedNow(b)
 
     def raiseError[B](e: Throwable): M[B] = Managed(_ => MF.raiseError(e))
 
@@ -85,7 +87,7 @@ trait ManagedInstances {
         MF.handleErrorWith(kb.run(a))((e: Throwable) => f(e).run(a))
       }
 
-     def flatMap[A, B](fa: M[A])(f: A => M[B]) = fa.flatMap(f)
+    def flatMap[A, B](fa: M[A])(f: A => M[B]) = fa.flatMap(f)
   }
 
   implicit def managedMonadErrorInstance[F[_]: MonadError[*[_], Throwable], A]: MonadError[Managed[F, A, *], Throwable] = new ManagedMonadError[F, A] {
@@ -93,11 +95,27 @@ trait ManagedInstances {
   }
 
   implicit def managedContravariant[F[_], B]: Contravariant[Managed[F, *, B]] = new Contravariant[Managed[F, *, B]]{
-
+    def contramap[A, A1](fa: Managed[F, A, B])(f: A1 => A): Managed[F, A1, B] = {
+      val newRun = Contravariant[(* => Resource[F, B])].contramap(fa.run)(f)
+      Managed(newRun)
+    }
   }
 
-  implicit def managedParallel[F[_]: Parallel, A]: Parallel[Managed[F, A, *]] = new Parallel[Managed[F, A, *]] {
+  implicit def managedParallel[M[_], A](implicit P: Parallel[M], M: MonadError[M, Throwable]): Parallel.Aux[Managed[M, A, *], Managed[P.F, A, *]] = new Parallel[Managed[M, A, *]]{
+    type F[x] = Kleisli[P.F, A, x]
+    implicit val monadM: Monad[M] = P.monad
+    def applicative: Applicative[Managed[P.F, A, *]] = catsDataApplicativeForManaged(P.applicative)
+    def monad: Monad[Managed[M, A, *]] = catsDataMonadForManaged
 
+    def sequential: Managed[P.F, A, *] ~> Managed[M, A, *] =
+      new (Managed[P.F, A, *] ~> Managed[M, A, *]) {
+        def apply[B](k: Managed[P.F, A, B]): Managed[M, A, B] = k.mapK(P.sequential)
+      }
+
+    def parallel: Managed[M, A, *] ~> Managed[P.F, A, *] =
+      new (Managed[M, A, *] ~> Managed[P.F, A, *]) {
+        def apply[B](k: Managed[M, A, B]): Managed[P.F, A, B] = k.mapK(P.parallel)
+      }
   }
 
 }
@@ -124,7 +142,7 @@ object Managed extends ManagedInstances {
     fromFunction(identity[R])
 
   def succeed[F[_]: Applicative, A](r: => A): Managed[F, Any, A] = {
-      fromFunction[F, Any, A](_ => r)
+    fromFunction[F, Any, A](_ => r)
   }
 
   def succeedNow[F[_]: Applicative, A](a: A): Managed[F, Any, A] = {
