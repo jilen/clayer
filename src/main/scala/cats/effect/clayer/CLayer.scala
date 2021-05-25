@@ -39,7 +39,7 @@ import cats.effect._
  */
 sealed abstract class CLayer[F[_], -RIn, +ROut](implicit F: Async[F], P: Parallel[F]) { self =>
 
-  type Layer[RIn, ROut] = CLayer[F, RIn, ROut]
+  type Layer[-RIn, +ROut] = CLayer[F, RIn, ROut]
 
   private final val bundle = CLayer.bundle[F]
 
@@ -230,7 +230,7 @@ sealed abstract class CLayer[F[_], -RIn, +ROut](implicit F: Async[F], P: Paralle
       case _ => false
     }
 
-  private final def scope: Managed[F, Nothing, MemoMap[F] => Managed[F, RIn, ROut]] =
+  private final def scope: Managed[F, Any, MemoMap[F] => Managed[F, RIn, ROut]] =
     self match {
       case CLayer.Fold(self, failure, success) =>
         Managed.succeed {memoMap =>
@@ -273,12 +273,12 @@ object CLayer {
   private[clayer] final case class Fresh[F[_]: Async: Parallel, RIn,  ROut](self: CLayer[F, RIn,  ROut])        extends CLayer[F, RIn,  ROut]
   private[clayer] final case class ManagedLayer[F[_]: Async: Parallel, -RIn, +ROut](self: Managed[F, RIn,  ROut]) extends CLayer[F, RIn,  ROut]
   private[clayer] final case class Suspend[F[_]: Async: Parallel, -RIn, +ROut](self: () => CLayer[F, RIn,  ROut]) extends CLayer[F, RIn,  ROut]
-  private[clayer] final case class ZipWith[F[_]: Async: Parallel, -RIn, +ROut, ROut2, ROut3](
+  private[clayer] final case class ZipWith[F[_]: Async: Parallel, -RIn, ROut, ROut2, ROut3](
     self: CLayer[F, RIn,  ROut],
     that: CLayer[F, RIn,  ROut2],
     f: (ROut, ROut2) => ROut3
   ) extends CLayer[F, RIn,  ROut3]
-  private[clayer] final case class ZipWithPar[F[_]: Async: Parallel, -RIn, + ROut, ROut2, ROut3](
+  private[clayer] final case class ZipWithPar[F[_]: Async: Parallel, -RIn, ROut, ROut2, ROut3](
     self: CLayer[F, RIn,  ROut],
     that: CLayer[F, RIn,  ROut2],
     f: (ROut, ROut2) => ROut3
@@ -326,8 +326,8 @@ object CLayer {
     /**
      * Constructs a layer from the specified effect.
      */
-    def fromEffect[F[_], R,  A: Tag](zio: R => F[A]): CLayer[F, R,  Has[A]] =
-      fromEffectMany(zio.asService)
+    def fromEffect[F[_]: Async: Parallel, R,  A: Tag](zio: R => F[A]): CLayer[F, R,  Has[A]] =
+      fromEffectMany(zio.map(_.map(Has(_))))
 
     /**
      * Constructs a layer from the specified effect, which must return one or
@@ -346,51 +346,51 @@ object CLayer {
      * Constructs a layer from the environment using the specified effectful
      * function.
      */
-    def fromFunctionM[F[_], A,  B: Tag](f: A => F[B]): CLayer[F, A,  Has[B]] =
+    def fromFunctionM[F[_]: Async: Parallel, A,  B: Tag](f: A => F[B]): CLayer[F, A,  Has[B]] =
       fromFunctionManaged(a => Managed.eval(f(a)))
 
     /**
      * Constructs a layer from the environment using the specified effectful
      * resourceful function.
      */
-    def fromFunctionManaged[F[_], A,  B: Tag](f: A => Managed[F, Any,  B]): CLayer[F, A,  Has[B]] =
+    def fromFunctionManaged[F[_]: Async: Parallel, A,  B: Tag](f: A => Managed[F, Any,  B]): CLayer[F, A,  Has[B]] =
       fromManaged(Managed.fromFunctionM(f))
 
     /**
      * Constructs a layer from the environment using the specified function,
      * which must return one or more services.
      */
-    def fromFunctionMany[A, B](f: A => B): CLayer[F, A, B] =
-      fromFunctionManyM(a => ZIO.succeedNow(f(a)))
+    def fromFunctionMany[F[_]: Async: Parallel, A, B](f: A => B): CLayer[F, A, B] =
+      fromFunctionManyM(a => Applicative[F].pure(f(a)))
 
     /**
      * Constructs a layer from the environment using the specified effectful
      * function, which must return one or more services.
      */
-    def fromFunctionManyM[A,  B](f: A => F[B]): CLayer[F, A,  B] =
-      fromFunctionManyManaged(a => f(a).toManaged_)
+    def fromFunctionManyM[F[_]: Async: Parallel, A,  B](f: A => F[B]): CLayer[F, A,  B] =
+      fromFunctionManyManaged(a => Managed.eval(f(a)))
 
     /**
      * Constructs a layer from the environment using the specified effectful
      * resourceful function, which must return one or more services.
      */
-    def fromFunctionManyManaged[A,  B](f: A => Managed[F, Any,  B]): CLayer[F, A,  B] =
+    def fromFunctionManyManaged[F[_]: Async: Parallel, A,  B](f: A => Managed[F, Any,  B]): CLayer[F, A,  B] =
       CLayer {
-
+        Managed.fromFunctionM(f)
       }
 
 
     /**
      * Constructs a layer from a managed resource.
      */
-    def fromManaged[F[_], R,  A: Tag](m: Managed[F, R,  A]): CLayer[F, R,  Has[A]] =
+    def fromManaged[F[_]: Async: Parallel, R,  A: Tag](m: Managed[F, R,  A]): CLayer[F, R,  Has[A]] =
       CLayer(m.asService)
 
     /**
      * Constructs a layer from a managed resource, which must return one or more
      * services.
      */
-    def fromManagedMany[F[_], R,  A](m: Managed[F, R,  A]): CLayer[F, R,  A] =
+    def fromManagedMany[R,  A](m: Managed[F, R,  A]): CLayer[F, R,  A] =
       CLayer(m)
 
     /**
@@ -404,60 +404,60 @@ object CLayer {
      * output.
      */
     def requires[A]: CLayer[F, A, A] =
-      CLayer(ZManaged.environment[A])
+      CLayer(Managed.environment[F, A])
 
     /**
      * A layer that passes along the second element of a tuple.
      */
-    def second[A]: CLayer[(Any, A), Nothing, A] =
-      bundle.fromFunctionMany(_._2)
+    def second[A]: CLayer[F, (Any, A), A] =
+      fromFunctionMany(_._2)
 
     /**
      * Constructs a layer that accesses and returns the specified service from
      * the environment.
      */
-    def service[A]: CLayer[Has[A], Nothing, Has[A]] =
-      CLayer(ZManaged.environment[Has[A]])
+    def service[A]: CLayer[F, Has[A], Has[A]] =
+      CLayer(Managed.environment[F, Has[A]])
 
     /**
      * Constructs a layer from the specified value.
      */
-    def succeed[A: Tag](a: A): ULayer[Has[A]] =
-      CLayer(ZManaged.succeedNow(Has(a)))
+    def succeed[F[_]: Async: Parallel, A: Tag](a: A): CLayer[F, Any, Has[A]] =
+      CLayer(Managed.succeedNow(Has(a)))
 
     /**
      * Constructs a layer from the specified value, which must return one or more
      * services.
      */
-    def succeedMany[A](a: A): ULayer[A] =
-      CLayer(ZManaged.succeedNow(a))
+    def succeedMany[A](a: A): CLayer[F, Any, A] =
+      CLayer(Managed.succeedNow(a))
 
     /**
      * Lazily constructs a layer. This is useful to avoid infinite recursion when
      * creating layers that refer to themselves.
      */
-    def suspend[RIn,  ROut](layer: => CLayer[RIn,  ROut]): CLayer[RIn,  ROut] = {
+    def suspend[F[_]: Async: Parallel, RIn,  ROut](layer: => CLayer[F, RIn,  ROut]): CLayer[F, RIn,  ROut] = {
       lazy val self = layer
       Suspend(() => self)
     }
 
-    implicit final class CLayerPassthroughOps[RIn,  ROut](private val self: CLayer[F, RIn,  ROut]) extends AnyVal {
+    implicit final class CLayerPassthroughOps[RIn,  ROut](private val self: CLayer[F, RIn,  ROut]) {
 
       /**
        * Returns a new layer that produces the outputs of this layer but also
        * passes through the inputs to this layer.
        */
-      def passthrough(implicit ev: Has.Union[RIn, ROut], tag: Tag[ROut]): CLayer[RIn,  RIn with ROut] =
+      def passthrough(implicit ev: Has.Union[RIn, ROut], tag: Tag[ROut]): CLayer[F, RIn,  RIn with ROut] =
         bundle.identity[RIn] ++ self
     }
 
-    implicit final class CLayerProjectOps[R,  A](private val self: CLayer[F, R,  Has[A]]) extends AnyVal {
+    implicit final class CLayerProjectOps[R,  A](private val self: CLayer[F, R,  Has[A]]) {
 
       /**
        * Projects out part of one of the layers output by this layer using the
        * specified function
        */
-      final def project[B: Tag](f: A => B)(implicit tag: Tag[A]): CLayer[R,  Has[B]] =
+      final def project[B: Tag](f: A => B)(implicit tag: Tag[A]): CLayer[F, R,  Has[B]] =
         self >>> bundle.fromFunction(r => f(r.get))
     }
   }

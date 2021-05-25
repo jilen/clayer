@@ -1,64 +1,146 @@
 package cats.effect.clayer
 
 import cats._
+import cats.data._
+import cats.evidence._
+import cats.syntax.all._
 import cats.effect._
 
-trait ManagedSyntax {
-  implicit class ManagedOps[F[_], R, A](self: Managed[F, R, A]) {
-    def provide[R](r: R)(implicit ev: NeedsEnv[R]): Managed[F, Any, A] = {
-      ???
+/**
+ * A managed resource produced from an environment R
+*/
+final case class Managed[F[_], -R, +A](run: R => Resource[F, A]) { self =>
+  def provide[R](r: R)(implicit ev: NeedsEnv[R]): Managed[F, Any, A] = {
+    ???
+  }
+
+  def provideSome[R0](f: R0 => R)(implicit ev: NeedsEnv[R]): Managed[F, R0, A] = {
+    val nf = Contravariant[Function1[*, Resource[F, A]]].contramap[R, R0](run)(f)
+    Managed(nf)
+  }
+
+  def useForever: R => F[Nothing] = {
+    ???
+  }
+
+  def use[R1 <: R, A](f: R1 => (R1 => F[A])): R1 => F[A] = {
+    ???
+  }
+
+  def memoize: Managed[F, Any, Managed[F, R, A]] = {
+    ???
+  }
+
+  def zipWith[R1 <: R, A1, A2](that: Managed[F, R1, A1])(f: (A, A1) => A2)(implicit F: MonadError[F, Throwable]): Managed[F, R1, A2] = {
+    (this, that).mapN(f)
+  }
+
+  def zipWithPar[R1 <: R, A1, A2](that: Managed[F, R1, A1])(f: (A, A1) => A2)(implicit F: MonadError[F, Throwable], P: Parallel[F]): Managed[F, R1, A2] = {
+    (self, that).parMapN(f)
+  }
+
+  def asService[A1 >: A: Tag](implicit F: MonadError[F, Throwable]): Managed[F, R, Has[A1]] = {
+    self.map(Has(_))
+  }
+
+  private[clayer] def ap[C, R1 <: R, B](f: Managed[F, R1, A => B])(implicit F: MonadError[F, Throwable]): Managed[F, R1, B] = {
+    Managed(a => Apply[Resource[F, *]].ap(f.run(a))(run(a)))
+  }
+
+  def ap[C, D, R1 <: R](f: Managed[F, R1, C])(implicit F: MonadError[F, Throwable], ev: A As (C => D)): Managed[F, R1, D] = {
+    val RF = MonadError[Resource[F, *], Throwable]
+    Managed { a =>
+      val fb: Resource[F, C => D] = RF.map(run(a))(ev.coerce)
+      val fc: Resource[F, C] = f.run(a)
+      RF.ap(fb)(fc)
     }
+  }
 
-    def provideSome[R0](f: R0 => R)(implicit ev: NeedsEnv[R]): Managed[R0, A] = {
-      val newR = self.contramap[(R0, Managed.ReleaseMap)](tp => f(tp._1) -> tp._2)
-      Managed(newR)
+  /**
+   *  Help type inference
+   */
+  def flatMap[R1 <: R, B](f: A => Managed[F, R1,  B]): Managed[F, R1, B] = {
+    val nf: R1 => Resource[F, B] = { r1 =>
+      this.run(r1).flatMap { a =>
+        f(a).run(r1)
+      }
     }
-
-    def useForever: R => F[Nothing]
-
-    def use[R1 <: R, A](f: R => (R1 => F[A])): R1 => F[A] = {
-      ???
-    }
-
-    def memoize: Managed[F, Any, Managed[F, R, A]] = {
-      ???
-    }
-
-    def zipWith[R1 <: R, A1, A2](that: Managed[F, R1, A1])(f: (A, A1) => A2): Managed[F, R1, A2] = {
-      (self, that).mapN(f)
-    }
-
-    def zipWithPar[R1 <: R, A1, A2](that: Managed[F, R1, A1])(f: (A, A1) => A2): Managed[F, R1, A2] = {
-      (self, that).parMapN(f)
-    }
-
-
+    Managed(nf)
   }
 }
 
-object Managed {
+
+trait ManagedInstances {
+   private[clayer] trait ManagedMonadError[F[_], A] extends MonadError[Managed[F, A, *], Throwable]  {
+
+    type M[B] = Managed[F, A, B]
+
+     implicit def F: MonadError[F, Throwable]
+     implicit def MF = MonadError[Resource[F, *], Throwable]
+
+    def raiseError[B](e: Throwable): M[B] = Managed(_ => MF.raiseError(e))
+
+    def handleErrorWith[B](kb: M[B])(f: Throwable => M[B]): M[B] =
+      Managed { (a: A) =>
+        MF.handleErrorWith(kb.run(a))((e: Throwable) => f(e).run(a))
+      }
+
+     def flatMap[A, B](fa: M[A])(f: A => M[B]) = fa.flatMap(f)
+  }
+
+  implicit def managedMonadErrorInstance[F[_]: MonadError[*[_], Throwable], A]: MonadError[Managed[F, A, *], Throwable] = new ManagedMonadError[F, A] {
+    def F = MonadError[F, Throwable]
+  }
+
+  implicit def managedContravariant[F[_], B]: Contravariant[Managed[F, *, B]] = new Contravariant[Managed[F, *, B]]{
+
+  }
+
+  implicit def managedParallel[F[_]: Parallel, A]: Parallel[Managed[F, A, *]] = new Parallel[Managed[F, A, *]] {
+
+  }
+
+}
+
+
+object Managed extends ManagedInstances {
+
+  type Finalizer[F[_]] = Resource.ExitCase => F[Any]
+  object Finalizer {
+    def noop[F[_]: Applicative]: Finalizer[F] = _ => Applicative[F].pure(())
+  }
 
   def make[F[_], R, A](acquire: R => F[A])(release: A => R => F[Any]): Managed[F, R, A] = {
     ???
   }
 
   def fail[F[_]: MonadError[*[_], Throwable]](e: Throwable): Managed[F, Any, Nothing] = {
-    MonadError[F, Throwable].raiseError(e)
+    eval {
+      MonadError[F, Throwable].raiseError(e)
+    }
   }
 
-  def environment[F[_], R]: Managed[F, R, R] =
+  def environment[F[_]: Applicative, R]: Managed[F, R, R] =
     fromFunction(identity[R])
 
-  def succeed[F[_], A](r: => A): Managed[F, Any, A] = {
-      fromFunction(_ => r)
-    }
+  def succeed[F[_]: Applicative, A](r: => A): Managed[F, Any, A] = {
+      fromFunction[F, Any, A](_ => r)
+  }
+
+  def succeedNow[F[_]: Applicative, A](a: A): Managed[F, Any, A] = {
+    succeed(a)
+  }
 
   def fromFunction[F[_]: Applicative, R, A](f: R => A) = {
     evalFunction(f.andThen(Applicative[F].pure))
   }
 
+  def fromFunctionM[F[_]: MonadError[*[_], Throwable], R, A](f: R => Managed[F, Any, A]): Managed[F, R, A] = {
+    fromFunction[F, R, Managed[F, R, A]](f).flatten
+  }
+
   def evalFunction[F[_], R, A](fa: R => F[A]): Managed[F, R, A] = {
-    Managed(fa.andThen(Resource.eval[F]))
+    Managed(fa.andThen(Resource.eval))
   }
 
   def eval[F[_], A](fa: F[A]): Managed[F, Any, A] = {
