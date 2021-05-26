@@ -233,7 +233,7 @@ sealed abstract class CLayer[F[_], -RIn, +ROut](implicit F: Async[F], P: Paralle
   private final def scope: Managed[F, Any, MemoMap[F] => Managed[F, RIn, ROut]] =
     self match {
       case CLayer.Fold(self, failure, success) =>
-        Managed.succeed {memoMap =>
+        Managed.succeed { memoMap =>
           memoMap
             .getOrElseMemoize(self)
             .redeemWith(
