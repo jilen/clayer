@@ -254,10 +254,6 @@ sealed abstract class CLayer[F[_], -RIn, +ROut](implicit F: Async[F], P: Paralle
     }
 }
 
-trait LayerFunctions[F[_]] {
-
-}
-
 object CLayer {
 
   def bundle[F[_]: Async: Parallel]: Bundle[F] = new Bundle[F] {
