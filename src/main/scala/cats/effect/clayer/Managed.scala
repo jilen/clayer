@@ -11,8 +11,9 @@ import scala.collection.immutable.LongMap
  * A managed resource produced from an environment R
  */
 final case class Managed[F[_], -R, +A](run: R => Resource[F, A]) { self =>
-  def provide[R](r: R)(implicit ev: NeedsEnv[R]): Managed[F, Any, A] = {
-    ???
+
+  def provide(r: R)(implicit ev: NeedsEnv[R]): Managed[F, Any, A] = {
+    provideSome(_ => r)
   }
 
   def provideSome[R0](f: R0 => R)(implicit ev: NeedsEnv[R]): Managed[F, R0, A] = {
@@ -29,9 +30,7 @@ final case class Managed[F[_], -R, +A](run: R => Resource[F, A]) { self =>
     run(r1).use(ra => f(ra)(r1))
   }
 
-  def memoize: Managed[F, Any, Managed[F, R, A]] = {
-    ???
-  }
+  def memoize: Managed[F, Any, Managed[F, R, A]] = ???
 
   def zipWith[R1 <: R, A1, A2](that: Managed[F, R1, A1])(f: (A, A1) => A2)(implicit F: MonadError[F, Throwable]): Managed[F, R1, A2] = {
     (this, that).mapN(f)
@@ -151,6 +150,7 @@ object Managed extends ManagedInstances {
   def eval[F[_], A](fa: F[A]): Managed[F, Any, A] = {
     evalFunction(_ => fa)
   }
+
 
   private sealed abstract class State[F[_]]
   private final case class Exited[F[_]](nextKey: Long, exit: Resource.ExitCase)            extends State[F]
