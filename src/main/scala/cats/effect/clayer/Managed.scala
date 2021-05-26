@@ -35,8 +35,10 @@ final case class Managed[F[_], -R, +A](run: R => Resource[F, A]) { self =>
     (this, that).mapN(f)
   }
 
-  def zipWithPar[R1 <: R, A1, A2](that: Managed[F, R1, A1])(f: (A, A1) => A2)(implicit F: MonadError[F, Throwable], P: Parallel[F]): Managed[F, R1, A2] = {
-    (self, that).parMapN(f)
+  def zipWithPar[R1 <: R, A1, A2](that: Managed[F, R1, A1])(f: (A, A1) => A2)(implicit F: MonadError[F, Throwable], P: Concurrent[F]): Managed[F, R1, A2] = {
+    Managed { r1 =>
+      (self.run(r1), that.run(r1)).parMapN(f)
+    }
   }
 
   def asService[A1 >: A: Tag](implicit F: MonadError[F, Throwable]): Managed[F, R, Has[A1]] = {
@@ -99,23 +101,6 @@ trait ManagedInstances {
       val newRun = Contravariant[(* => Resource[F, B])].contramap(fa.run)(f)
       Managed(newRun)
     }
-  }
-
-  implicit def managedParallel[M[_], A](implicit P: Parallel[M], M: MonadError[M, Throwable]): Parallel.Aux[Managed[M, A, *], Managed[P.F, A, *]] = new Parallel[Managed[M, A, *]]{
-    type F[x] = Kleisli[P.F, A, x]
-    implicit val monadM: Monad[M] = P.monad
-    def applicative: Applicative[Managed[P.F, A, *]] = catsDataApplicativeForManaged(P.applicative)
-    def monad: Monad[Managed[M, A, *]] = catsDataMonadForManaged
-
-    def sequential: Managed[P.F, A, *] ~> Managed[M, A, *] =
-      new (Managed[P.F, A, *] ~> Managed[M, A, *]) {
-        def apply[B](k: Managed[P.F, A, B]): Managed[M, A, B] = k.mapK(P.sequential)
-      }
-
-    def parallel: Managed[M, A, *] ~> Managed[P.F, A, *] =
-      new (Managed[M, A, *] ~> Managed[P.F, A, *]) {
-        def apply[B](k: Managed[M, A, B]): Managed[P.F, A, B] = k.mapK(P.parallel)
-      }
   }
 
 }
