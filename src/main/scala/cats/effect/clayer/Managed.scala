@@ -19,12 +19,13 @@ final case class Managed[F[_], -R, +A](run: R => Resource[F, A]) { self =>
     Managed(nf)
   }
 
-  def useForever: R => F[Nothing] = {
-    ???
-  }
+  def useForever(implicit F: Async[F]): R => F[Nothing] = use_[R, Nothing](_ => F.never)
 
-  def use[R1 <: R, A](f: R1 => (R1 => F[A])): R1 => F[A] = {
-    ???
+  def use_[R1 <: R, B](f: R1 => F[B])(implicit mc: MonadCancel[F, Throwable]): R1 => F[B] =
+    use(_ => f)
+
+  def use[R1 <: R, B](f: A => R1 => F[B])(implicit mc: MonadCancel[F, Throwable]): R1 => F[B] = { r1 =>
+    run(r1).use(ra => f(ra)(r1))
   }
 
   def memoize: Managed[F, Any, Managed[F, R, A]] = {
