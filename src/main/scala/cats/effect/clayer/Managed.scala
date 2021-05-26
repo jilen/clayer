@@ -5,6 +5,7 @@ import cats.data._
 import cats.evidence._
 import cats.syntax.all._
 import cats.effect._
+import scala.collection.immutable.LongMap
 
 /**
  * A managed resource produced from an environment R
@@ -151,9 +152,80 @@ object Managed extends ManagedInstances {
     evalFunction(_ => fa)
   }
 
+  private sealed abstract class State[F[_]]
+  private final case class Exited[F[_]](nextKey: Long, exit: Resource.ExitCase)            extends State[F]
+  private final case class Running[F[_]](nextKey: Long, finalizers: LongMap[Finalizer[F]]) extends State[F]
+
 
   object ReleaseMap {
-    def make[F[_]]: F[ReleaseMap[F]] = ???
+    def make[F[_]](implicit F: Concurrent[F]): F[ReleaseMap[F]] = {
+      val initKey = -1L
+
+      def next(l: Long) =
+        if (l == 0L) throw new RuntimeException("ReleaseMap wrapped around")
+        else if (l == Long.MinValue) Long.MaxValue
+        else l - 1
+
+      val initState: State[F] = Running[F](initKey, LongMap.empty)
+
+      Ref.of[F, State[F]](initState).map { ref =>
+        new ReleaseMap[F] {
+          type Key = Long
+
+          def add(finalizer: Finalizer[F]): F[Finalizer[F]] =
+            addIfOpen(finalizer).map {
+              case Some(key) => release(key, _)
+              case None      => _ => F.unit.widen[Any]
+            }
+
+          def addIfOpen(finalizer: Finalizer[F]): F[Option[Key]] =
+            ref.modify {
+              case Exited(nextKey, exit) =>
+                Exited(next(nextKey), exit) -> finalizer(exit).as(none[Key])
+              case Running(nextKey, fins) =>
+                Running(next(nextKey), fins + (nextKey -> finalizer)) -> F.pure(nextKey.some)
+            }.flatten
+
+          def release(key: Key, exit: Resource.ExitCase): F[Any] =
+            ref.modify {
+              case s @ Exited(_, _) => (s, F.unit.widen[Any])
+              case s @ Running(_, fins) =>
+                (s.copy(finalizers = fins - key), fins.get(key).fold(F.unit.widen[Any])(_(exit)))
+            }.flatten
+
+          def releaseAll(exit: Resource.ExitCase): F[Any] =
+            ref.modify {
+              case s @ Exited(_, _) => (s, F.unit.widen[Any])
+              case Running(nextKey, fins) =>
+                val runFins = fins.toSeq.traverse {
+                  case (k, fin) => fin(exit)
+                }.widen[Any]
+                (Exited(nextKey, exit), runFins)
+            }
+
+          def remove(key: Key): F[Option[Finalizer[F]]] =
+            ref.modify {
+              case Exited(nk, exit)  => (Exited(nk, exit), None)
+              case Running(nk, fins) => (Running(nk, fins - key), fins.get(key))
+            }
+
+          def replace(key: Key, finalizer: Finalizer[F]): F[Option[Finalizer[F]]] =
+            ref.modify {
+              case Exited(nk, exit)  => (Exited(nk, exit), finalizer(exit).as(none[Finalizer[F]]))
+              case Running(nk, fins) => (Running(nk, fins + (key -> finalizer)), F.pure(fins.get(key)))
+            }.flatten
+
+          def get(key: Key): F[Option[Finalizer[F]]] =
+            ref.get.map {
+              case Exited(_, _)     => None
+              case Running(_, fins) => fins get key
+            }
+
+        }
+
+      }
+    }
+
   }
 
 
@@ -187,20 +259,20 @@ object Managed extends ManagedInstances {
     /**
      * Retrieves the finalizer associated with this key.
      */
-    def get(key: Key): F[F[Finalizer[F]]]
+    def get(key: Key): F[Option[Finalizer[F]]]
 
     /**
      * Runs the specified finalizer and removes it from the finalizers
      * associated with this scope.
      */
-    def release(key: Key, exit: Resource.ExitCase): F[Unit]
+    def release(key: Key, exit: Resource.ExitCase): F[Any]
 
     /**
      * Runs the finalizers associated with this scope using the specified
      * execution strategy. After this action finishes, any finalizers added
      * to this scope will be run immediately.
      */
-    def releaseAll(exit: Resource.ExitCase): F[Unit]
+    def releaseAll(exit: Resource.ExitCase): F[Any]
 
     /**
      * Removes the finalizer associated with this key and returns it.
