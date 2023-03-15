@@ -1,10 +1,15 @@
-name := "clayer"
+name := "cats-layer"
 
-scalaVersion := "2.13.6"
+scalaVersion := "2.13.10"
 
-libraryDependencies ++= Seq(
-  "org.typelevel" %% "cats-effect" % "3.1.1",
-  "dev.zio" %% "izumi-reflect" % "1.1.2"
+scalacOptions := Seq(
+  "-Xsource:3"
 )
 
-addCompilerPlugin("org.typelevel" % "kind-projector" % "0.13.0" cross CrossVersion.full)
+libraryDependencies ++= Seq(
+  "org.typelevel" %% "cats-effect" % "3.4.8",
+  "org.scala-lang" % "scala-reflect" % scalaVersion.value,
+  "dev.zio" %% "izumi-reflect" % "2.3.0",
+  "org.scalameta" %% "munit" % "1.0.0-M7" % Test,
+  "org.hamcrest" % "hamcrest" % "2.2" % Test
+)
