@@ -21,7 +21,6 @@ object Helpers {
 }
 
 trait DB
-
 object DB {
   val live: Layer[Any, DB] = Layer.resource {
     makeRes("db").as(new DB {})
@@ -57,6 +56,7 @@ object Service2 {
   }
 }
 
+trait App
 object App {
   val live: Layer[Service1 & Service2, App] = Layer.resource {
     (s1: Service1, s2: Service2) =>
@@ -82,5 +82,8 @@ class LayerSuite extends munit.FunSuite {
       Service2.live,
       App.live
     )
+    appLayer.build(ZEnv(())).use { app =>
+      IO.println(s"Run app ${app}")
+    }
   }
 }
