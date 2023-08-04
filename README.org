@@ -2,7 +2,7 @@
 
 This small library is intented to direct copy into your project.
 
-Components:
+** Component layers
 
 #+BEGIN_SRC scala
   trait DB
@@ -21,36 +21,37 @@ Components:
 
   trait AClient
   object AClient {
-    val live: Layer[HttpCli, AClient] = Layer.resource { (a: HttpCli) =>
+    val live: Layer[HttpCli, AClient] = Layer.function { (a: HttpCli) =>
       makeRes("AClient").as(new AClient {})
     }
   }
 
   trait Service1
   object Service1 {
-    val live: Layer[DB & HttpCli, Service1] = Layer.fromFunction {
+    val live: Layer[DB & HttpCli, Service1] = Layer.function {
       (db: DB, http: HttpCli) =>
-      new Service1 {}
+      IO(new Service1 {}).toResource
     }
   }
   trait Service2
   object Service2 {
-    val live: Layer[DB & AClient, Service2] = Layer.fromFunction {
+    val live: Layer[DB & AClient, Service2] = Layer.function {
       (db: DB, aclient: AClient) =>
-      new Service2 {}
+      IO(new Service2 {}).toResource
     }
   }
 
   trait App
   object App {
-    val live: Layer[Service1 & Service2, App] = Layer.resource {
+    val live: Layer[Service1 & Service2, App] = Layer.function {
       (s1: Service1, s2: Service2) =>
       makeRes("app").as(new App {})
     }
   }
   #+END_SRC
 
-Layers:
+** Wire app toghther
+
 #+BEGIN_SRC scala
   val appLayer: Layer[Any, App] =
       (DB.live ++ (HttpCli.live >+> AClient.live)) >>> (Service1.live ++ Service2.live) >>> App.live // Munally construction
@@ -63,4 +64,12 @@ Layers:
       Service2.live,
       App.live
     )
+#+END_SRC
+
+** Use app layer
+
+#+BEGIN_SRC scala
+  appLayer.build(ZEnv(())).use { env =>
+    IO.println(env.get[App])
+  }
 #+END_SRC

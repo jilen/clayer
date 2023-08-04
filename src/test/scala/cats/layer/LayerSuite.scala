@@ -119,7 +119,7 @@ class LayerSuite extends CatsEffectSuite {
       .flatMap { fib =>
         fib.joinWithNever.flatMap { // stopSignal 已设置
           case (s1, check) =>
-            check.stopped.map(f => assert(f, true))
+            check.stopped.map(f => assertEquals(f, true))
               >> IO(assertEquals(s1, false))
         }
       }
