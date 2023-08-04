@@ -1,4 +1,4 @@
-package cats.layer.macros
+package cats.layer
 
 final case class Node[+Key, +A](
     inputs: List[Key],

@@ -1,5 +1,4 @@
 package cats.layer
-package macros
 
 import scala.reflect.macros.blackbox
 

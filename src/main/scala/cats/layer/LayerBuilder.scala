@@ -1,5 +1,4 @@
 package cats.layer
-package macros
 
 import java.nio.charset.StandardCharsets
 import java.util.Base64

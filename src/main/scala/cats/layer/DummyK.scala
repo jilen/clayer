@@ -1,4 +1,4 @@
-package cats.layer.macros
+package cats.layer
 
 /** DummyK is used to pull `WeakTypeTag` information into a Macro when there is
   * otherwise no value to extract it from. See: [[ZLayerMakeMacros.makeImpl]]

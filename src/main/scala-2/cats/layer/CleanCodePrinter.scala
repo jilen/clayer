@@ -1,4 +1,4 @@
-package cats.layer.macros
+package cats.layer
 
 import scala.reflect.macros.blackbox
 
@@ -151,7 +151,7 @@ private[layer] object CleanCodePrinter {
     */
   private def cleanImplicits(c: blackbox.Context)(expr: c.Tree): c.Tree = {
     import c.universe._
-    val tagType = c.weakTypeOf[cats.layer.Tag[_]]
+    val tagType = c.weakTypeOf[Tag[_]]
 
     def loop(expr: c.Tree): c.Tree =
       expr match {

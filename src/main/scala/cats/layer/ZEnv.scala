@@ -41,8 +41,9 @@ final class ZEnv[+R] private (
 
   /** Retrieves a service from the environment.
     */
-  def get[A >: R](implicit tag: Tag[A]): A =
+  def get[A >: R](implicit tag: Tag[A]): A = {
     unsafe.get[A](tag.tag)(Unsafe.unsafe)
+  }
 
   /** Retrieves a service from the environment corresponding to the specified
     * key.
@@ -71,7 +72,7 @@ final class ZEnv[+R] private (
       )
     if (missingServices.nonEmpty) {
       throw new Error(
-        s"Defect in zio.ZEnv: ${missingServices} statically known to be contained within the environment are missing"
+        s"Defect in ZEnv: ${missingServices} statically known to be contained within the environment are missing"
       )
     }
 
@@ -80,8 +81,7 @@ final class ZEnv[+R] private (
       new ZEnv(
         filterKeys(self.map)(tag => set.exists(taggedIsSubtype(tag, _))),
         index
-      )
-        .asInstanceOf[ZEnv[R]]
+      ).asInstanceOf[ZEnv[R]]
   }
 
   /** The size of the environment, which is the number of services contained in
@@ -174,7 +174,7 @@ final class ZEnv[+R] private (
         )
       }
 
-      def get[A](tag: LightTypeTag)(implicit unsafe: Unsafe): A =
+      def get[A](tag: LightTypeTag)(implicit unsafe: Unsafe): A = {
         self.cache.get(tag) match {
           case Some(a) => a.asInstanceOf[A]
           case None =>
@@ -190,13 +190,14 @@ final class ZEnv[+R] private (
             }
             if (service == null)
               throw new Error(
-                s"Defect in zio.ZEnv: Could not find ${tag} inside ${self}"
+                s"Defect in ZEnv: Could not find ${tag} inside ${self}"
               )
             else {
               self.cache = self.cache.updated(tag, service)
               service
             }
         }
+      }
 
       private[ZEnv] def update[A >: R](tag: LightTypeTag, f: A => A)(implicit
           unsafe: Unsafe

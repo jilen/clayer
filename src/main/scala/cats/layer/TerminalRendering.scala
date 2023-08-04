@@ -1,4 +1,4 @@
-package cats.layer.macros
+package cats.layer
 
 import ansi._
 

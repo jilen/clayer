@@ -1,4 +1,4 @@
-package cats.layer.macros
+package cats.layer
 
 sealed trait GraphError[+Key, +A]
 

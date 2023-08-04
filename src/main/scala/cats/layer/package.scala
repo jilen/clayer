@@ -5,6 +5,7 @@ import izumi.reflect.macrortti._
 import java.util.{Map => JMap}
 
 package object layer {
+
   type ULayer[+A] = Layer[Any, A]
 
   type Tag[A] = izumi.reflect.Tag[A]
@@ -43,4 +44,5 @@ package object layer {
     def unsafe[A](f: Unsafe => A): A =
       f(unsafe)
   }
+
 }
